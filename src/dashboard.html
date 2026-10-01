@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 14px system-ui, sans-serif; max-width: 1100px; margin: 24px auto;
+           padding: 0 16px; background: #fff; color: #222; }
+
+    /* ---- dark mode: explicit, high-contrast palette ---- */
+    @media (prefers-color-scheme: dark) {
+      body { background: #141414; color: #e8e8e8; }
+      table { border-color: #454545 !important; }
+      th, td { border-bottom-color: #3d3d3d !important; }
+      th { background: #222 !important; color: #cfcfcf !important; }
+      .editor-panel { background: #1f1f1f !important; border-color: #4d4d4d !important; }
+      label { color: #f0f0f0; }
+      input[type=text] { background: #2a2a2a !important; border-color: #5c5c5c !important;
+                         color: #f5f5f5 !important; }
+      input[type=text]::placeholder { color: #9a9a9a; }
+      select { background: #2a2a2a !important; border-color: #5c5c5c !important;
+               color: #f5f5f5 !important; padding: 7px 9px; border-radius: 4px;
+               width: 100%; box-sizing: border-box; }
+      textarea { background: #1a1a1a !important; border-color: #5c5c5c !important;
+                 color: #e6e6e6 !important; }
+      .hint { color: #b0b0b0 !important; }
+      button { background: #2f2f2f; border-color: #6a6a6a; color: #f0f0f0; }
+      button:hover { background: #3a3a3a; }
+      .updated { color: #b5b5b5 !important; }
+      #addBtn { background: #245f36; border-color: #2e9e44; }
+    }
+
+    h1 { font-size: 20px; }
+    h2 { font-size: 16px; color: inherit; }
+
+    table { border-collapse: collapse; width: 100%; margin-bottom: 24px;
+            border: 1px solid #ddd; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #ddd; }
+    th { background: #f5f5f5; font-size: 12px; text-transform: uppercase;
+         letter-spacing: .04em; color: #555; }
+    .mono, code { font-family: ui-monospace, monospace; font-size: 12px; }
+    .updated { color: #888; font-size: 12px; white-space: nowrap; }
+    .ver { font-weight: 600; white-space: nowrap; }
+    .match-list { max-width: 260px; }
+    .match-list div { font-family: ui-monospace, monospace; font-size: 11px;
+                      color: #777; overflow: hidden; text-overflow: ellipsis;
+                      white-space: nowrap; }
+
+    button { cursor: pointer; border-radius: 6px; border: 1px solid #bbb;
+             background: #f2f2f2; color: #222; padding: 6px 10px; font: inherit; }
+    button.ghost { background: transparent; }
+    .update-btn { font-size: 15px; padding: 4px 8px; }
+    #addBtn { font-weight: 600; padding: 8px 14px; margin-bottom: 20px; }
+
+    /* toggle switch */
+    .switch { position: relative; width: 34px; height: 20px; flex-shrink: 0;
+              cursor: pointer; display: inline-block; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider { position: absolute; inset: 0; border-radius: 20px;
+              background: #9a9a9a; transition: background .15s; }
+    .slider::before { content: ''; position: absolute; top: 2px; left: 2px;
+                      width: 16px; height: 16px; border-radius: 50%;
+                      background: #fff; transition: transform .15s;
+                      box-shadow: 0 1px 2px rgba(0,0,0,.3); }
+    input:checked + .slider { background: #2e9e44; }
+    input:checked + .slider::before { transform: translateX(14px); }
+
+    /* editor panel */
+    .editor-panel { display: none; background: #f9f9f9; border: 1px solid #ccc;
+                    border-radius: 8px; padding: 16px; margin-bottom: 24px; }
+    .editor-panel.visible { display: block; }
+    label { display: block; font-weight: 600; margin: 12px 0 4px; color: #333; }
+    input[type=text] { width: 100%; box-sizing: border-box; padding: 7px 9px;
+                       border: 1px solid #bbb; border-radius: 4px;
+                       background: #fff; color: #222; }
+    input[type=text]::placeholder { color: #999; }
+    select { width: 100%; box-sizing: border-box; padding: 7px 9px;
+             border: 1px solid #bbb; border-radius: 4px;
+             background: #fff; color: #222; font: inherit; }
+    textarea { width: 100%; box-sizing: border-box; height: 280px;
+               font: 12px ui-monospace, monospace; padding: 10px;
+               border: 1px solid #bbb; border-radius: 6px;
+               background: #fff; color: #222; tab-size: 2; }
+    textarea::placeholder { color: #888; }
+    .hint { color: #777; font-size: 12px; margin-top: 2px; }
+    .row { display: flex; gap: 8px; margin-top: 16px; align-items: center; }
+    #status { margin-left: 8px; color: #2e9e44; font-weight: 600; }
+    .actions { white-space: nowrap; }
+    .actions button { margin-right: 4px; }
+
+    /* install dialog */
+    /* install dialog — visibility via .open class, NOT the hidden attribute
+       (display:flex would override [hidden]) */
+    .install-dialog { position: fixed; inset: 0; background: rgba(0,0,0,.45);
+                      display: none; align-items: center; justify-content: center;
+                      z-index: 100; }
+    .install-dialog.open { display: flex; }
+    .install-card { background: #fff; color: #222; border-radius: 10px;
+                    padding: 24px; max-width: 460px; width: 90%;
+                    box-shadow: 0 8px 32px rgba(0,0,0,.3); }
+    .install-card h2 { margin-top: 0; }
+    .install-card .row { justify-content: flex-end; margin-top: 20px; }
+    .install-card button.primary { background: #2e9e44; border-color: #26853a;
+                                   color: #fff; font-weight: 600; padding: 9px 16px; }
+    .install-meta { font-size: 12px; margin-top: 8px; line-height: 1.6; }
+    .install-meta div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    @media (prefers-color-scheme: dark) {
+      .install-card { background: #242424; color: #eee; border: 1px solid #555; }
+    }
+    .meta-note { font-size: 12px; color: #2e9e44; margin-top: 8px; font-weight: 600; }
+
+    /* extension update bar */
+    .ext-update { display: flex; gap: 8px; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
+    .ext-update input[type=text] { flex: 1; min-width: 320px; }
+    @media (prefers-color-scheme: dark) {
+      #extStatus { color: #b5b5b5; }
+    }
+    /* ---- final dark-mode overrides (must come LAST so they win the cascade
+       over the light button rules above) ---- */
+    @media (prefers-color-scheme: dark) {
+      button, button.ghost { color: #f0f0f0 !important; background: #2c2c2c; border-color: #6a6a6a; }
+      button:hover { background: #3a3a3a; }
+      button.ghost { background: transparent; border-color: #666; }
+      .install-card button, .install-card button.ghost { color: #eee !important; }
+      .install-card button.primary { color: #fff !important; background: #2e9e44; }
+    }
+  </style>
+</head>
+<body>
+  <h1>SBR-bot — Kontrollpanel</h1>
+
+  <!-- Extension update check -->
+  <div class="ext-update">
+    <input type="text" id="extSource" placeholder="manifest-URL för tilläggets dist-repo, t.ex. https://raw.githubusercontent.com/USER/sbr-bot-dist/main/manifest.json">
+    <button id="checkExt">Kontrollera tilläggsuppdatering</button>
+    <span id="extStatus" class="hint"></span>
+  </div>
+
+  <!-- Install/Update dialog -->
+  <div class="install-dialog" id="installDialog">
+    <div class="install-card">
+      <h2 id="installTitle">Installera script</h2>
+      <p id="installInfo"></p>
+      <div id="installMeta" class="install-meta"></div>
+      <div class="row">
+        <button id="installYes" class="primary">✅ Installera</button>
+        <button id="installCancel">Avbryt</button>
+      </div>
+    </div>
+  </div>
+
+  <button id="addBtn">➕ Lägg till nytt script</button>
+
+  <table id="tbl">
+    <thead>
+      <tr>
+        <th>På</th>
+        <th>Namn</th>
+        <th>Version</th>
+        <th>Matchar</th>
+        <th>Senast uppdaterad</th>
+        <th>Uppdatera</th>
+        <th>Ändra</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+
+  <!-- Editor -->
+  <div class="editor-panel" id="editor">
+    <h2 id="editorTitle">Nytt script</h2>
+    <input type="hidden" id="id">
+    <label for="name">Namn</label>
+    <input type="text" id="name" placeholder="Fylls i automatiskt från @name">
+    <label for="version">Version</label>
+    <input type="text" id="version" placeholder="Fylls i automatiskt från @version">
+    <label for="updateURL">Uppdaterings-URL</label>
+    <input type="text" id="updateURL" placeholder="Fylls i automatiskt från @updateURL">
+    <div class="hint">Om angiven hämtas ny version härifrån med ♻️ och automatiskt var 30:e minut — byts bara om @version är högre.</div>
+    <label for="excludes">Undantagna URL:er (@exclude)</label>
+    <input type="text" id="excludes" placeholder="Fylls i automatiskt från @exclude-rader (valfritt)">
+    <div class="hint">URL:er här körs scriptet aldrig på, även om en @match-rad matchar.</div>
+    <label for="runAt">Kör vid (@run-at)</label>
+    <select id="runAt">
+      <option value="document-start">document-start — innan sidan börjar rendera</option>
+      <option value="document-end">document-end — när DOM:en är klar</option>
+      <option value="document-idle" selected>document-idle — när sidan är helt klar (standard)</option>
+    </select>
+    <div class="hint">Hämtas från kodens @run-at om den finns.</div>
+    <label for="code">Kod</label>
+    <textarea id="code" spellcheck="false"
+      placeholder="// ==UserScript==&#10;// @name    Mitt script&#10;// @version 1.0&#10;// @match   https://example.com/*&#10;// ==/UserScript==&#10;// Din JavaScript-kod"></textarea>
+    <div class="hint">Matchande URL:er (@match) hämtas automatiskt ur koden — inget separat fält behövs.</div>
+    <div class="meta-note" id="metaNote"></div>
+    <div class="row">
+      <button id="save">Spara</button>
+      <button id="cancel">Avbryt</button>
+      <span id="status"></span>
+    </div>
+  </div>
+
+  <script src="dashboard.js"></script>
+</body>
+</html>

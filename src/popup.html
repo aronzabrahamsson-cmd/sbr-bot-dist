@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      width: 300px; margin: 0; padding: 0;
+      font: 13px system-ui, sans-serif;
+      background: #fff; color: #222;
+    }
+    @media (prefers-color-scheme: dark) {
+      body { background: #1e1e1e; color: #eee; }
+      header { border-bottom-color: #3a3a3a !important; }
+      li { border-bottom-color: #333 !important; }
+      .url { color: #999 !important; }
+    }
+    header {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 12px; border-bottom: 1px solid #e5e5e5;
+      font-weight: 700; font-size: 14px;
+    }
+    .url { padding: 6px 12px 0; color: #888; font-size: 11px;
+           white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    ul { list-style: none; margin: 0; padding: 4px 0; }
+    li { display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+         border-bottom: 1px solid #f0f0f0; }
+    li .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* toggle switch: gray = off, green = on */
+    .switch { position: relative; width: 34px; height: 20px; flex-shrink: 0; cursor: pointer; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; inset: 0; border-radius: 20px;
+      background: #9a9a9a; transition: background .15s;
+    }
+    .slider::before {
+      content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+      border-radius: 50%; background: #fff; transition: transform .15s;
+      box-shadow: 0 1px 2px rgba(0,0,0,.3);
+    }
+    input:checked + .slider { background: #2e9e44; }
+    input:checked + .slider::before { transform: translateX(14px); }
+
+    .empty { padding: 14px 12px; color: #888; font-size: 12px; }
+    footer { padding: 10px 12px; }
+    footer button {
+      width: 100%; padding: 9px; cursor: pointer; border-radius: 6px;
+      border: 1px solid #ccc; background: #f5f5f5; color: inherit; font: inherit;
+    }
+    @media (prefers-color-scheme: dark) {
+      footer button { background: #2c2c2c; border-color: #444; }
+    }
+    /* final dark overrides — must be last to win over light button rules */
+    @media (prefers-color-scheme: dark) {
+      footer button { background: #2c2c2c !important; border-color: #6a6a6a; color: #f0f0f0 !important; }
+    }
+  </style>
+</head>
+<body>
+  <header>SBR-bot</header>
+  <div class="url" id="currentUrl"></div>
+  <ul id="list"></ul>
+  <div class="empty" id="empty" hidden>
+    Inga script för denna URL.<br>Lägg till ett i kontrollpanelen.
+  </div>
+  <footer>
+    <button id="manage">Kontrollpanel</button>
+  </footer>
+  <script src="popup.js"></script>
+</body>
+</html>

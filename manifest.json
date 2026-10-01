@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "SBR-bot",
+  "version": "0.9.0",
+  "description": "Userscript manager: runs scripts from @match URLs, parses Tampermonkey metadata, supports GM_* shims, version-based auto-update and .user.js install links.",
+  "permissions": ["storage", "scripting", "tabs", "alarms", "downloads", "webNavigation", "userScripts", "unlimitedStorage"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "options_page": "src/dashboard.html",
+  "action": {
+    "default_popup": "src/popup.html",
+    "default_title": "SBR-bot"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/userscript-link-cs.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
