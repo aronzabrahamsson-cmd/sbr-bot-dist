@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SBR-bot",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "description": "Userscript manager: runs scripts from @match URLs, parses Tampermonkey metadata, supports GM_* shims, version-based auto-update and .user.js install links.",
   "permissions": ["storage", "scripting", "tabs", "alarms", "downloads", "webNavigation", "userScripts", "unlimitedStorage"],
   "host_permissions": ["<all_urls>"],

@@ -188,23 +188,21 @@ window.__sbrInit = function (config) {
   const listeners = {};
   let listenerSeq = 0;
   let port = null;
-  let portCallbacks = {};
   let callSeq = 0;
   const progListeners = [];
+  // The port is a keep-alive only: it holds the SW awake and carries
+  // progress events. Request/response traffic goes over sendMessage,
+  // which is the proven path from the USER_SCRIPT world.
   const connectPort = function () {
     try {
       port = chrome.runtime.connect({ name: 'sbr-bot-bridge' });
       port.onMessage.addListener(function (m) {
         if (m && m.type === 'gmXhrProgress') {
           for (const fn of progListeners) { try { fn(m); } catch (e) { /* ignore */ } }
-          return;
         }
-        const cb = portCallbacks[m.__seq];
-        if (cb) { delete portCallbacks[m.__seq]; cb(m.response); }
       });
       port.onDisconnect.addListener(function () {
         port = null;
-        portCallbacks = {};
         setTimeout(connectPort, 1000);
       });
       return true;
@@ -216,55 +214,35 @@ window.__sbrInit = function (config) {
   connectPort();
   const call = function (type, extra, _retries) {
     return new Promise(function (resolve, reject) {
-      const seq = ++callSeq;
-      const payload = Object.assign({ type: type, storeKey: storeKey, __seq: seq }, extra || {});
-      const sendViaPort = function () {
-        if (port) {
-          portCallbacks[seq] = resolve;
-          try {
-            port.postMessage(payload);
-          } catch (e) {
-            delete portCallbacks[seq];
-            retry();
-          }
-        } else {
-          retry();
-        }
-      };
-      const retry = function () {
-        // fallback: one-shot sendMessage (also covers a dead port mid-request)
-        try {
-          chrome.runtime.sendMessage(payload, function (response) {
-            const err = chrome.runtime.lastError;
-            if (err) {
-              if (!_retries) {
-                setTimeout(function () {
-                  connectPort();
-                  call(type, extra, 1).then(resolve, reject);
-                }, 250);
-              } else {
-                console.error('[SBR-bot] sendMessage failed:', err.message);
-                reject(new Error(err.message));
-              }
+      const payload = Object.assign({ type: type, storeKey: storeKey }, extra || {});
+      try {
+        chrome.runtime.sendMessage(payload, function (response) {
+          const err = chrome.runtime.lastError;
+          if (err) {
+            // worker asleep/awakening: message woke it, retry shortly
+            if (!_retries) {
+              setTimeout(function () { call(type, extra, 1).then(resolve, reject); }, 250);
             } else {
-              resolve(response);
+              console.error('[SBR-bot] sendMessage failed:', err.message);
+              reject(new Error(err.message));
             }
-          });
-        } catch (e) {
-          if (!_retries) {
-            setTimeout(function () {
-              connectPort();
-              call(type, extra, 1).then(resolve, reject);
-            }, 250);
           } else {
-            reject(e);
+            resolve(response);
           }
+        });
+      } catch (e) {
+        if (!_retries) {
+          setTimeout(function () { call(type, extra, 1).then(resolve, reject); }, 250);
+        } else {
+          reject(e);
         }
-      };
-      sendViaPort();
+      }
     });
   };
-  call('ping', {}).then(function () {
+  Promise.race([
+    call('ping', {}),
+    new Promise(function (_, rej) { setTimeout(function () { rej(new Error('ping timeout')); }, 2000); })
+  ]).then(function () {
     console.log('[SBR-bot] bridge OK');
   }, function (e) {
     console.error('[SBR-bot] bridge ping FAILED:', e && e.message);
@@ -869,6 +847,14 @@ const handleGmMessage = async (msg, sender, sendResponse) => {
         break;
       }
       case 'gmXhr': {
+        const gmXhrT0 = Date.now();
+        const gmXhrUrl = msg.opts?.url;
+        console.log('[SBR-bot] gmXhr received:', gmXhrUrl);
+        const origSendResponse = sendResponse;
+        sendResponse = (r) => {
+          console.log('[SBR-bot] gmXhr responded:', gmXhrUrl, 'status', r?.status, 'in', Date.now() - gmXhrT0, 'ms');
+          origSendResponse(r);
+        };
         // SW keep-alive: while a gmXhr is in flight, reset the idle timer so a
         // long (e.g. 120s) fetch cannot be killed by MV3 idle termination
         gmXhrInFlight++;
@@ -906,7 +892,7 @@ const handleGmMessage = async (msg, sender, sendResponse) => {
               chunks.push(step.value);
               received += step.value.length;
               try {
-                const p = msg.__port;
+                const p = bridgePortsByTab.get(sender?.tab?.id);
                 if (p) p.postMessage({
                   type: 'gmXhrProgress', reqSeq: msg.reqSeq,
                   progress: { lengthComputable: total > 0, loaded: received, total: total }
@@ -1063,15 +1049,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // Port bridge: persistent connections keep the SW alive and auto-relay to the
 // same handlers; the shim reconnects on disconnect.
 const bridgePorts = new Set();
+const bridgePortsByTab = new Map();
 
 chrome.runtime.onConnect.addListener((port) => {
   bridgePorts.add(port);
-  port.onDisconnect.addListener(() => bridgePorts.delete(port));
+  const tabId = port.sender?.tab?.id;
+  if (tabId != null) bridgePortsByTab.set(tabId, port);
+  port.onDisconnect.addListener(() => {
+    bridgePorts.delete(port);
+    if (tabId != null && bridgePortsByTab.get(tabId) === port) bridgePortsByTab.delete(tabId);
+  });
+  // Ports are keep-alive + progress relays only; request/response runs over
+  // onMessage/sendMessage (the proven path from the USER_SCRIPT world).
   port.onMessage.addListener((msg) => {
-    if (msg?.type === 'gmXhr') msg.__port = port;
-    handleGmMessage(msg, port.sender, (response) => {
-      try { port.postMessage({ __seq: msg.__seq, response }); } catch (e) { /* port closed */ }
-    });
+    if (msg?.type === 'keepalive' || !msg?.type) return;
+    if (msg.type === 'gmXhrPortPing') {
+      try { port.postMessage({ type: 'gmXhrPortPong' }); } catch (e) { /* closed */ }
+    }
   });
 });
 
