@@ -243,16 +243,29 @@ window.__sbrInit = function (config) {
 
   function GM_xmlhttpRequest(opts) {
     opts = opts || {};
-    call('gmXhr', {
+    const timeoutMs = opts.timeout || 30000;
+    // hard shim-side timeout: even if the SW dies and the promise never settles,
+    // the callback contract is honored (ontimeout/onerror always fires)
+    const request = call('gmXhr', {
       opts: {
         method: opts.method || 'GET',
         url: opts.url,
         headers: opts.headers || {},
         data: opts.data || null,
         responseType: opts.responseType || 'text',
-        timeout: opts.timeout || 30000
+        timeout: timeoutMs
       }
-    }).then(function (r) {
+    });
+    const guard = new Promise(function (resolve) {
+      setTimeout(function () { resolve({ __shimTimeout: true }); }, timeoutMs + 5000);
+    });
+    Promise.race([request, guard]).then(function (r) {
+      r = r || {};
+      if (r.__shimTimeout) {
+        if (opts.ontimeout) opts.ontimeout({ error: 'timeout', status: 0, readyState: 4 });
+        else if (opts.onerror) opts.onerror({ error: 'timeout', status: 0, readyState: 4 });
+        return;
+      }
       r = r || {};
       if (r.status === 0 && r.error) {
         if (r.error === 'timeout' && opts.ontimeout) {
@@ -535,6 +548,9 @@ chrome.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
 
 /* ---------- messages ---------- */
 
+let gmXhrInFlight = 0;
+let gmXhrKeepAlive = null;
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     switch (msg?.type) {
@@ -590,6 +606,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       /* ----- GM bridge handlers (from sandbox) ----- */
       case 'gmXhr': {
+        // SW keep-alive: while a gmXhr is in flight, reset the idle timer so a
+        // long (e.g. 120s) fetch cannot be killed by MV3 idle termination
+        gmXhrInFlight++;
+        if (!gmXhrKeepAlive) {
+          gmXhrKeepAlive = setInterval(() => {
+            if (gmXhrInFlight <= 0) {
+              clearInterval(gmXhrKeepAlive);
+              gmXhrKeepAlive = null;
+              return;
+            }
+            chrome.runtime.getPlatformInfo(() => chrome.runtime.lastError);
+          }, 20000);
+        }
         try {
           const opts = msg.opts || {};
           const { method, url, headers, data } = opts;
@@ -633,6 +662,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         } catch (e) {
           const isTimeout = e && (e.name === 'TimeoutError' || e.name === 'AbortError');
           sendResponse({ status: 0, responseText: '', error: isTimeout ? 'timeout' : e.message });
+        } finally {
+          gmXhrInFlight--;
+          if (gmXhrInFlight <= 0 && gmXhrKeepAlive) {
+            clearInterval(gmXhrKeepAlive);
+            gmXhrKeepAlive = null;
+          }
         }
         break;
       }
