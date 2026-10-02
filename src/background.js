@@ -6,6 +6,17 @@
 const UPDATE_ALARM = 'sbr-bot-update';
 const UPDATE_PERIOD_MIN = 30;
 
+// Re-assert USER_SCRIPT world messaging on EVERY cold start: if this is not
+// applied, chrome.runtime.sendMessage from the user script world throws
+// "Receiving end does not exist". Must run at top level, before any await.
+if (chrome.userScripts?.configureWorld) {
+  chrome.userScripts.configureWorld({ messaging: true })
+    .then(() => console.log('[SBR-bot] SW up, userScripts world messaging enabled'))
+    .catch(e => console.error('[SBR-bot] configureWorld failed (is "Till\u00e5t anv\u00e4ndarskript" on?):', e));
+} else {
+  console.warn('[SBR-bot] SW up, but chrome.userScripts unavailable');
+}
+
 /* ---------- metadata parsing ---------- */
 
 function parseMetadata(code) {
@@ -176,9 +187,88 @@ window.__sbrInit = function (config) {
   const storeKey = config.storeKey;
   const listeners = {};
   let listenerSeq = 0;
-  const call = function (type, extra) {
-    return chrome.runtime.sendMessage(Object.assign({ type: type, storeKey: storeKey }, extra || {}));
+  let port = null;
+  let portCallbacks = {};
+  let callSeq = 0;
+  const progListeners = [];
+  const connectPort = function () {
+    try {
+      port = chrome.runtime.connect({ name: 'sbr-bot-bridge' });
+      port.onMessage.addListener(function (m) {
+        if (m && m.type === 'gmXhrProgress') {
+          for (const fn of progListeners) { try { fn(m); } catch (e) { /* ignore */ } }
+          return;
+        }
+        const cb = portCallbacks[m.__seq];
+        if (cb) { delete portCallbacks[m.__seq]; cb(m.response); }
+      });
+      port.onDisconnect.addListener(function () {
+        port = null;
+        portCallbacks = {};
+        setTimeout(connectPort, 1000);
+      });
+      return true;
+    } catch (e) {
+      port = null;
+      return false;
+    }
   };
+  connectPort();
+  const call = function (type, extra, _retries) {
+    return new Promise(function (resolve, reject) {
+      const seq = ++callSeq;
+      const payload = Object.assign({ type: type, storeKey: storeKey, __seq: seq }, extra || {});
+      const sendViaPort = function () {
+        if (port) {
+          portCallbacks[seq] = resolve;
+          try {
+            port.postMessage(payload);
+          } catch (e) {
+            delete portCallbacks[seq];
+            retry();
+          }
+        } else {
+          retry();
+        }
+      };
+      const retry = function () {
+        // fallback: one-shot sendMessage (also covers a dead port mid-request)
+        try {
+          chrome.runtime.sendMessage(payload, function (response) {
+            const err = chrome.runtime.lastError;
+            if (err) {
+              if (!_retries) {
+                setTimeout(function () {
+                  connectPort();
+                  call(type, extra, 1).then(resolve, reject);
+                }, 250);
+              } else {
+                console.error('[SBR-bot] sendMessage failed:', err.message);
+                reject(new Error(err.message));
+              }
+            } else {
+              resolve(response);
+            }
+          });
+        } catch (e) {
+          if (!_retries) {
+            setTimeout(function () {
+              connectPort();
+              call(type, extra, 1).then(resolve, reject);
+            }, 250);
+          } else {
+            reject(e);
+          }
+        }
+      };
+      sendViaPort();
+    });
+  };
+  call('ping', {}).then(function () {
+    console.log('[SBR-bot] bridge OK');
+  }, function (e) {
+    console.error('[SBR-bot] bridge ping FAILED:', e && e.message);
+  });
   const configId = config.id;
   const menuCommands = {};
   let xhrSeq = 0;
@@ -288,7 +378,8 @@ window.__sbrInit = function (config) {
         }
         return;
       };
-      chrome.runtime.onMessage.addListener(onProg);
+      progListeners.push(onProg);
+      try { chrome.runtime.onMessage.addListener(onProg); } catch (e) { /* ignore */ }
     } catch (e) { /* onMessage unavailable */ }
     Promise.race([request, guard]).then(function (r) {
       if (onProg) { try { chrome.runtime.onMessage.removeListener(onProg); } catch (e) { /* ignore */ } }
@@ -664,9 +755,12 @@ let gmXhrInFlight = 0;
 let gmXhrKeepAlive = null;
 const gmXhrControllers = new Map();
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  (async () => {
+const handleGmMessage = async (msg, sender, sendResponse) => {
+  {
     switch (msg?.type) {
+      case 'ping':
+        sendResponse({ ok: true, at: Date.now() });
+        break;
       case 'injectNow': {
         const tab = (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
         if (tab?.id != null && tab.url) {
@@ -812,10 +906,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               chunks.push(step.value);
               received += step.value.length;
               try {
-                chrome.tabs.sendMessage(sender.tab.id, {
+                const p = msg.__port;
+                if (p) p.postMessage({
                   type: 'gmXhrProgress', reqSeq: msg.reqSeq,
                   progress: { lengthComputable: total > 0, loaded: received, total: total }
-                }, () => void chrome.runtime.lastError);
+                });
               } catch (e) { /* ignore */ }
             }
             bodyBlob = new Blob(chunks);
@@ -957,8 +1052,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         break;
     }
-  })();
+  }
+};
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  handleGmMessage(msg, sender, sendResponse);
   return true;
+});
+
+// Port bridge: persistent connections keep the SW alive and auto-relay to the
+// same handlers; the shim reconnects on disconnect.
+const bridgePorts = new Set();
+
+chrome.runtime.onConnect.addListener((port) => {
+  bridgePorts.add(port);
+  port.onDisconnect.addListener(() => bridgePorts.delete(port));
+  port.onMessage.addListener((msg) => {
+    if (msg?.type === 'gmXhr') msg.__port = port;
+    handleGmMessage(msg, port.sender, (response) => {
+      try { port.postMessage({ __seq: msg.__seq, response }); } catch (e) { /* port closed */ }
+    });
+  });
 });
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
