@@ -28,6 +28,8 @@ async function render() {
 
   list.innerHTML = '';
   empty.hidden = matching.length > 0;
+  const menuData = (await send({ type: 'getMenuCommands' })) || {};
+  const menusByScript = menuData.commands || {};
 
   for (const s of matching) {
     const li = document.createElement('li');
@@ -52,6 +54,17 @@ async function render() {
 
     li.append(name, sw);
     list.appendChild(li);
+    const cmds = (menusByScript['gm_' + s.id] || []).slice(0, 5);
+    for (const c of cmds) {
+      const cli = document.createElement('li');
+      cli.style.cursor = 'pointer';
+      const cname = document.createElement('span');
+      cname.className = 'name';
+      cname.textContent = '• ' + c.text;
+      cli.onclick = () => send({ type: 'gmRunMenu', storeKey: 'gm_' + s.id, menuId: c.id });
+      cli.append(cname);
+      list.appendChild(cli);
+    }
   }
 }
 

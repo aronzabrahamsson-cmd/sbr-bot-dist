@@ -179,6 +179,15 @@ window.__sbrInit = function (config) {
   const call = function (type, extra) {
     return chrome.runtime.sendMessage(Object.assign({ type: type, storeKey: storeKey }, extra || {}));
   };
+  const configId = config.id;
+  const menuCommands = {};
+  let xhrSeq = 0;
+  // menu command callbacks: the popup sends {type:'gmRunMenu', scriptId, menuId}
+  window.__sbrRunMenu = function (scriptId, menuId) {
+    if (scriptId !== configId) return;
+    const fn = menuCommands[menuId];
+    if (fn) { try { fn(); } catch (e) { console.error('[SBR-bot] menu command error', e); } }
+  };
 
   // live cache: storage changes from other frames/tabs update the local
   // snapshot, so GM_getValue always reflects fresh data
@@ -241,40 +250,68 @@ window.__sbrInit = function (config) {
   }
 
 
+  function b64ToBytes(b64) {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+
   function GM_xmlhttpRequest(opts) {
     opts = opts || {};
     const timeoutMs = opts.timeout || 30000;
+    const reqSeq = ++xhrSeq;
+    let state = { aborted: false, done: false };
     // hard shim-side timeout: even if the SW dies and the promise never settles,
     // the callback contract is honored (ontimeout/onerror always fires)
     const request = call('gmXhr', {
+      reqSeq: reqSeq,
       opts: {
         method: opts.method || 'GET',
         url: opts.url,
         headers: opts.headers || {},
         data: opts.data || null,
         responseType: opts.responseType || 'text',
-        timeout: timeoutMs
+        timeout: timeoutMs,
+        wantProgress: !!opts.onprogress
       }
     });
     const guard = new Promise(function (resolve) {
       setTimeout(function () { resolve({ __shimTimeout: true }); }, timeoutMs + 5000);
     });
+    let onProg = null;
+    try {
+      onProg = function (msg) {
+        if (!msg || msg.type !== 'gmXhrProgress' || msg.reqSeq !== reqSeq) return;
+        if (msg.progress && opts.onprogress && !state.done) {
+          opts.onprogress(msg.progress);
+        }
+        return;
+      };
+      chrome.runtime.onMessage.addListener(onProg);
+    } catch (e) { /* onMessage unavailable */ }
     Promise.race([request, guard]).then(function (r) {
+      if (onProg) { try { chrome.runtime.onMessage.removeListener(onProg); } catch (e) { /* ignore */ } }
+      if (state.aborted) return;
       r = r || {};
       if (r.__shimTimeout) {
         if (opts.ontimeout) opts.ontimeout({ error: 'timeout', status: 0, readyState: 4 });
         else if (opts.onerror) opts.onerror({ error: 'timeout', status: 0, readyState: 4 });
         return;
       }
-      r = r || {};
       if (r.status === 0 && r.error) {
-        if (r.error === 'timeout' && opts.ontimeout) {
+        if (r.error === 'abort') {
+          state.aborted = true;
+          if (opts.onabort) opts.onabort({ error: 'abort', status: 0, readyState: 0 });
+          else if (opts.onerror) opts.onerror({ error: 'abort', status: 0, readyState: 4 });
+        } else if (r.error === 'timeout' && opts.ontimeout) {
           opts.ontimeout({ error: 'timeout', status: 0, readyState: 4 });
         } else if (opts.onerror) {
           opts.onerror({ error: r.error, status: 0, readyState: 4 });
         }
         return;
       }
+      state.done = true;
       const details = {
         status: r.status,
         statusText: r.statusText || '',
@@ -284,21 +321,82 @@ window.__sbrInit = function (config) {
         finalUrl: opts.url,
         readyState: 4
       };
-      if (r.responseType === 'blob' && r.blobB64) {
-        const bin = atob(r.blobB64);
-        const bytes = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        details.response = new Blob([bytes], { type: r.blobType || 'application/octet-stream' });
+      if (r.blobB64) {
+        const bytes = b64ToBytes(r.blobB64);
+        if ((opts.responseType || 'text') === 'arraybuffer') details.response = bytes.buffer;
+        else details.response = new Blob([bytes], { type: r.blobType || 'application/octet-stream' });
         details.responseText = undefined;
       }
       if ((opts.responseType || 'text') === 'json') {
-        try { details.response = JSON.parse(r.responseText); }
-        catch (e) { details.response = null; }
+        try { details.response = JSON.parse(r.responseText); } catch (e) { details.response = null; }
       }
       if (opts.onload) opts.onload(details);
     }).catch(function (err) {
-      if (opts.onerror) opts.onerror({ error: String(err), status: 0, readyState: 4 });
+      if (!state.aborted && opts.onerror) opts.onerror({ error: String(err), status: 0, readyState: 4 });
     });
+    return {
+      abort: function () {
+        if (state.aborted || state.done) return;
+        state.aborted = true;
+        try { call('gmXhrAbort', { reqSeq: reqSeq }); } catch (e) { /* ignore */ }
+      }
+    };
+  }
+
+  function GM_log() {
+    try { console.log.apply(console, ['[GM]'].concat([].slice.call(arguments))); } catch (e) { /* ignore */ }
+  }
+
+  function GM_addElement(parentOrTag, tagOrAttrs, attrs) {
+    const isParent = parentOrTag && parentOrTag.appendChild;
+    const parent = isParent ? parentOrTag : (document.head || document.documentElement);
+    const tag = isParent ? tagOrAttrs : parentOrTag;
+    const attributes = isParent ? attrs : tagOrAttrs;
+    const el = document.createElement(tag);
+    if (attributes) {
+      for (const entry of Object.entries(attributes)) {
+        if (entry[0].toLowerCase() === 'textcontent') el.textContent = entry[1];
+        else el.setAttribute(entry[0], entry[1]);
+      }
+    }
+    parent.appendChild(el);
+    return el;
+  }
+
+  function GM_registerMenuCommand(text, callback, accessKeyOrOpts) {
+    const options = accessKeyOrOpts && typeof accessKeyOrOpts === 'object' ? accessKeyOrOpts : {};
+    const idPromise = call('gmRegisterMenu', { text: String(text), options: options })
+      .then(function (r) {
+        const mid = r && r.id;
+        if (mid != null) menuCommands[mid] = callback;
+        return mid;
+      });
+    return idPromise;
+  }
+
+  function GM_unregisterMenuCommand(id) {
+    const real = id && id.then ? id : Promise.resolve(id);
+    real.then(function (mid) {
+      delete menuCommands[mid];
+      call('gmUnregisterMenu', { id: mid });
+    });
+  }
+
+  // GM4-style async helpers and plural variants
+  function GM_getValues(obj) {
+    const out = {};
+    for (const k of Object.keys(obj)) out[k] = GM_getValue(k, obj[k]);
+    return Promise.resolve(out);
+  }
+
+  function GM_setValues(obj) {
+    for (const entry of Object.entries(obj)) GM_setValue(entry[0], entry[1]);
+    return Promise.resolve();
+  }
+
+  function GM_deleteValues(keys) {
+    for (const k of keys) GM_deleteValue(k);
+    return Promise.resolve();
   }
 
   function GM_download(urlOrOpts, name) {
@@ -351,21 +449,35 @@ window.__sbrInit = function (config) {
 
   const GM_info = { script: { name: config.name, version: config.version } };
   const GM = {
-    setValue: GM_setValue,
-    getValue: GM_getValue,
-    deleteValue: GM_deleteValue,
-    listValues: GM_listValues,
+    setValue: function (k, v) { return Promise.resolve(GM_setValue(k, v)); },
+    getValue: function (k, d) { return Promise.resolve(GM_getValue(k, d)); },
+    deleteValue: function (k) { return Promise.resolve(GM_deleteValue(k)); },
+    getValues: GM_getValues,
+    setValues: GM_setValues,
+    deleteValues: GM_deleteValues,
+    listValues: function () { return Promise.resolve(GM_listValues()); },
     addValueChangeListener: GM_addValueChangeListener,
     removeValueChangeListener: GM_removeValueChangeListener,
     xmlHttpRequest: GM_xmlhttpRequest,
-    download: GM_download,
-    setClipboard: GM_setClipboard,
-    notification: GM_notification,
+    download: function (u, n) { return Promise.resolve(GM_download(u, n)); },
+    setClipboard: function (t) { return GM_setClipboard(t); },
+    notification: function (t, ti) { return GM_notification(t, ti); },
     addStyle: GM_addStyle,
+    addElement: GM_addElement,
+    registerMenuCommand: GM_registerMenuCommand,
+    unregisterMenuCommand: GM_unregisterMenuCommand,
+    log: GM_log,
     info: GM_info
   };
 
   window.GM_setValue = GM_setValue;
+  window.GM_getValues = GM_getValues;
+  window.GM_setValues = GM_setValues;
+  window.GM_deleteValues = GM_deleteValues;
+  window.GM_log = GM_log;
+  window.GM_addElement = GM_addElement;
+  window.GM_registerMenuCommand = GM_registerMenuCommand;
+  window.GM_unregisterMenuCommand = GM_unregisterMenuCommand;
   window.GM_getValue = GM_getValue;
   window.GM_deleteValue = GM_deleteValue;
   window.GM_listValues = GM_listValues;
@@ -550,6 +662,7 @@ chrome.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
 
 let gmXhrInFlight = 0;
 let gmXhrKeepAlive = null;
+const gmXhrControllers = new Map();
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
@@ -568,6 +681,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case 'getScripts':
         sendResponse({ ok: true, scripts: await getScripts() });
         break;
+      case 'getMenuCommands': {
+        const data = await chrome.storage.local.get('menuCommands');
+        const all = data.menuCommands || {};
+        const commands = {};
+        const now = Date.now();
+        for (const [id, c] of Object.entries(all)) {
+          if (now - (c.at || 0) > 86400000) { delete all[id]; continue; }
+          if (!commands[c.scriptId]) commands[c.scriptId] = [];
+          commands[c.scriptId].push({ id, text: c.text });
+        }
+        await chrome.storage.local.set({ menuCommands: all });
+        sendResponse({ ok: true, commands });
+        break;
+      }
       case 'getInjectErrors': {
         const data = await chrome.storage.local.get('injectErrors');
         sendResponse({ ok: true, errors: data.injectErrors || {} });
@@ -605,6 +732,48 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
 
       /* ----- GM bridge handlers (from sandbox) ----- */
+      case 'gmRegisterMenu': {
+        const data = await chrome.storage.local.get('menuCommands');
+        const all = data.menuCommands || {};
+        const id = msg.storeKey + ':' + Date.now() + ':' + Math.floor(Math.random() * 1e6);
+        all[id] = { scriptId: msg.storeKey, text: msg.text, at: Date.now() };
+        await chrome.storage.local.set({ menuCommands: all });
+        sendResponse({ ok: true, id: id });
+        break;
+      }
+      case 'gmUnregisterMenu': {
+        const data = await chrome.storage.local.get('menuCommands');
+        const all = data.menuCommands || {};
+        delete all[msg.id];
+        await chrome.storage.local.set({ menuCommands: all });
+        sendResponse({ ok: true });
+        break;
+      }
+      case 'gmRunMenu': {
+        // relay to the script's injected context in the active tab's frames
+        try {
+          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (tab?.id != null) {
+            await chrome.userScripts.execute({
+              target: { tabId: tab.id, allFrames: true },
+              js: [{ code: 'window.__sbrRunMenu && window.__sbrRunMenu(' +
+                JSON.stringify(msg.storeKey) + ', ' + JSON.stringify(msg.menuId) + ');' }],
+              world: 'USER_SCRIPT',
+              injectImmediately: true
+            });
+          }
+          sendResponse({ ok: true });
+        } catch (e) {
+          sendResponse({ ok: false, error: e.message });
+        }
+        break;
+      }
+      case 'gmXhrAbort': {
+        const ctl = gmXhrControllers.get(msg.reqSeq);
+        if (ctl) { ctl.userAborted = true; try { ctl.controller.abort(); } catch (e) { /* ignore */ } }
+        sendResponse({ ok: true });
+        break;
+      }
       case 'gmXhr': {
         // SW keep-alive: while a gmXhr is in flight, reset the idle timer so a
         // long (e.g. 120s) fetch cannot be killed by MV3 idle termination
@@ -622,19 +791,44 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           const opts = msg.opts || {};
           const { method, url, headers, data } = opts;
+          const controller = new AbortController();
+          gmXhrControllers.set(msg.reqSeq, { controller, userAborted: false });
+          const timeoutId = setTimeout(() => controller.abort(), opts.timeout || 30000);
           const res = await fetch(url, {
             method: method || 'GET',
             headers: headers || {},
             body: data || undefined,
-            signal: AbortSignal.timeout(opts.timeout || 30000)
+            signal: controller.signal
           });
+          let bodyBlob = null;
+          if (opts.wantProgress && sender?.tab?.id != null && res.body) {
+            const reader = res.body.getReader();
+            const chunks = [];
+            let received = 0;
+            const total = Number(res.headers.get('content-length')) || 0;
+            for (;;) {
+              const step = await reader.read();
+              if (step.done) break;
+              chunks.push(step.value);
+              received += step.value.length;
+              try {
+                chrome.tabs.sendMessage(sender.tab.id, {
+                  type: 'gmXhrProgress', reqSeq: msg.reqSeq,
+                  progress: { lengthComputable: total > 0, loaded: received, total: total }
+                }, () => void chrome.runtime.lastError);
+              } catch (e) { /* ignore */ }
+            }
+            bodyBlob = new Blob(chunks);
+          } else {
+            bodyBlob = await res.blob();
+          }
           const responseHeaders = [...res.headers.entries()]
             .map(([k, v]) => k + ': ' + v).join('\r\n');
           const responseType = opts.responseType || 'text';
           if (responseType === 'blob') {
             // structured clone through sendResponse is unreliable for Blobs:
             // transfer base64 and rebuild the Blob page-side, preserving MIME type
-            const blob = await res.blob();
+            const blob = bodyBlob;
             const buf = await blob.arrayBuffer();
             const bytes = new Uint8Array(buf);
             let bin = '';
@@ -654,15 +848,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             sendResponse({
               status: res.status,
               statusText: res.statusText,
-              responseText: await res.text(),
+              responseText: await bodyBlob.text(),
               responseHeaders,
               responseType
             });
           }
         } catch (e) {
-          const isTimeout = e && (e.name === 'TimeoutError' || e.name === 'AbortError');
-          sendResponse({ status: 0, responseText: '', error: isTimeout ? 'timeout' : e.message });
+          const ctl = gmXhrControllers.get(msg.reqSeq);
+          const abortedByUser = !!(ctl && ctl.userAborted);
+          sendResponse({ status: 0, responseText: '', error: abortedByUser ? 'abort' : (e.message || 'error') });
         } finally {
+          clearTimeout(typeof timeoutId !== 'undefined' ? timeoutId : undefined);
+          gmXhrControllers.delete(msg.reqSeq);
           gmXhrInFlight--;
           if (gmXhrInFlight <= 0 && gmXhrKeepAlive) {
             clearInterval(gmXhrKeepAlive);
