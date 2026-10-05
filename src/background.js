@@ -681,8 +681,13 @@ function scriptParses(code) {
 }
 
 function balancedBrackets(code) {
-  let depth = 0, quote = null, escape = false, comment = null;
-  const pairs = { ')': '(', ']': '[', '}': '{' };
+  // Context stack for correctness without eval:
+  //  - "'" / '"' : inside that quote (escapes handled)
+  //  - 'tpl'    : inside a template literal's TEXT part
+  //  - 'expr'   : inside a ${...} placeholder (template interpolation),
+  //               where strings/comments/regexes (even `nested`) can appear.
+  const stack = [];
+  let depth = 0, escape = false, comment = null, regexPossible = true;
   for (let i = 0; i < code.length; i++) {
     const ch = code[i];
     if (escape) { escape = false; continue; }
@@ -691,21 +696,63 @@ function balancedBrackets(code) {
       else if (comment === '/*' && ch === '/' && code[i - 1] === '*') comment = null;
       continue;
     }
-    if (quote) {
+    const top = stack[stack.length - 1];
+    if (top === "'" || top === '"') {
       if (ch === '\\') escape = true;
-      else if (ch === quote) quote = null;
+      else if (ch === top) { stack.pop(); regexPossible = false; }
       continue;
     }
-    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (top === 'tpl') {
+      if (ch === '\\') { escape = true; continue; }
+      if (ch === '`') { stack.pop(); regexPossible = false; continue; }
+      if (ch === '$' && code[i + 1] === '{') {
+        stack.push('expr');
+        depth++;
+        i++;
+        regexPossible = true;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") { stack.push(ch); regexPossible = false; continue; }
+    if (ch === '`') { stack.push('tpl'); regexPossible = false; continue; }
     if (ch === '/' && code[i + 1] === '/') { comment = '//'; continue; }
     if (ch === '/' && code[i + 1] === '*') { comment = '/*'; continue; }
-    if (ch === '(' || ch === '[' || ch === '{') depth++;
-    else if (pairs[ch]) {
+    if (ch === '/' && regexPossible) {
+      let j = i + 1, inClass = false;
+      for (; j < code.length; j++) {
+        const c = code[j];
+        if (c === '\\') j++;
+        else if (c === '[') inClass = true;
+        else if (c === ']') inClass = false;
+        else if (c === '\n') return { error: `Oavslutat reguljärt uttryck vid position ${i}` };
+        else if (c === '/' && !inClass) break;
+      }
+      if (j >= code.length) return { error: `Oavslutat reguljärt uttryck vid position ${i}` };
+      i = j;
+      regexPossible = false;
+      continue;
+    }
+    if (ch === '(' || ch === '[' || ch === '{') { depth++; regexPossible = true; continue; }
+    if (ch === ')' || ch === ']' || ch === '}') {
+      if (ch === '}' && stack[stack.length - 1] === 'expr') {
+        stack.pop();
+        depth--;
+        regexPossible = false;
+        continue;
+      }
       depth--;
       if (depth < 0) return { error: `Oförväntad '${ch}' vid position ${i}` };
+      regexPossible = false;
+      continue;
     }
+    regexPossible = !/[A-Za-z0-9_$\)\]\}]/.test(ch);
   }
-  if (quote) return { error: `Oavslutad sträng (${quote})` };
+  if (stack.length) {
+    const top = stack[stack.length - 1];
+    if (top === 'tpl') return { error: 'Oavslutad mallsträng (`)' };
+    if (top === 'expr') return { error: 'Oavslutad interpolation (${)' };
+    return { error: `Oavslutad sträng (${top})` };
+  }
   if (comment === '/*') return { error: 'Oavslutad blockkommentar' };
   if (depth !== 0) return { error: `Obalanserade parenteser (djup ${depth})` };
   return true;
