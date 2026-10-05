@@ -742,7 +742,6 @@ function balancedBrackets(code) {
         if (c === '/') { closed = true; break; }
       }
       if (closed) { i = j + 1; regexPossible = false; continue; }
-      if (j >= code.length) return { error: `Oavslutat reguljärt uttryck vid position ${i}` };
     }
     if (ch === '(' || ch === '[' || ch === '{') { depth++; regexPossible = true; i++; continue; }
     if (ch === ')') { depth--; if (depth < 0) return { error: `Of\u00f6rv\u00e4ntad ')' vid position ${i}` }; regexPossible = false; i++; continue; }
