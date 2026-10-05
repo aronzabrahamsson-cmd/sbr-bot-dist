@@ -666,7 +666,49 @@ async function injectMatching(tabId, url) {
 // Syntax-probe a script body BEFORE swapping it in: a truncated/broken
 // update must never replace the last known-good version.
 function scriptParses(code) {
-  try { new Function(code); return true; } catch (e) { return { error: e.message }; }
+  try {
+    new Function(code);
+    return true;
+  } catch (e) {
+    // MV3 extension CSP forbids eval ('new Function' counts as eval) in the
+    // service worker, so the probe itself throws a CSP EvalError. That is NOT
+    // a syntax error in the script — fall back to brace/paren balance checks.
+    if (e instanceof EvalError || /Content Security Policy|unsafe-eval/i.test(e.message)) {
+      return balancedBrackets(code);
+    }
+    return { error: e.message };
+  }
+}
+
+function balancedBrackets(code) {
+  let depth = 0, quote = null, escape = false, comment = null;
+  const pairs = { ')': '(', ']': '[', '}': '{' };
+  for (let i = 0; i < code.length; i++) {
+    const ch = code[i];
+    if (escape) { escape = false; continue; }
+    if (comment) {
+      if (comment === '//' && ch === '\n') comment = null;
+      else if (comment === '/*' && ch === '/' && code[i - 1] === '*') comment = null;
+      continue;
+    }
+    if (quote) {
+      if (ch === '\\') escape = true;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (ch === '/' && code[i + 1] === '/') { comment = '//'; continue; }
+    if (ch === '/' && code[i + 1] === '*') { comment = '/*'; continue; }
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (pairs[ch]) {
+      depth--;
+      if (depth < 0) return { error: `Oförväntad '${ch}' vid position ${i}` };
+    }
+  }
+  if (quote) return { error: `Oavslutad sträng (${quote})` };
+  if (comment === '/*') return { error: 'Oavslutad blockkommentar' };
+  if (depth !== 0) return { error: `Obalanserade parenteser (djup ${depth})` };
+  return true;
 }
 
 // FNV-1a content hash: detects repaired re-publishes that reuse a version
