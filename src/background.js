@@ -681,79 +681,91 @@ function scriptParses(code) {
 }
 
 function balancedBrackets(code) {
-  // Context stack for correctness without eval:
-  //  - "'" / '"' : inside that quote (escapes handled)
-  //  - 'tpl'    : inside a template literal's TEXT part
-  //  - 'expr'   : inside a ${...} placeholder (template interpolation),
-  //               where strings/comments/regexes (even `nested`) can appear.
+  // Lightweight tokenizer (no eval, MV3 CSP forbids it). Tracks strings,
+  // template literals with ${...} interpolation (nestable), comments, and
+  // bracket depth. Regex literals get a lookahead scan: a real regex always
+  // ends with an unescaped "/" before the next newline; otherwise the "/" was
+  // division and we just continue. This keeps false positives near zero.
+  const REGEX_AFTER = new Set(['return', 'typeof', 'instanceof', 'in', 'of',
+    'new', 'delete', 'void', 'do', 'else', 'yield', 'await', 'case', 'throw']);
   const stack = [];
-  let depth = 0, escape = false, comment = null, regexPossible = true;
-  for (let i = 0; i < code.length; i++) {
+  let depth = 0, escape = false, regexPossible = true, i = 0;
+  while (i < code.length) {
     const ch = code[i];
-    if (escape) { escape = false; continue; }
-    if (comment) {
-      if (comment === '//' && ch === '\n') comment = null;
-      else if (comment === '/*' && ch === '/' && code[i - 1] === '*') comment = null;
-      continue;
-    }
+    if (escape) { escape = false; i++; continue; }
     const top = stack[stack.length - 1];
     if (top === "'" || top === '"') {
       if (ch === '\\') escape = true;
       else if (ch === top) { stack.pop(); regexPossible = false; }
-      continue;
+      i++; continue;
     }
     if (top === 'tpl') {
-      if (ch === '\\') { escape = true; continue; }
-      if (ch === '`') { stack.pop(); regexPossible = false; continue; }
+      if (ch === '\\') { escape = true; i++; continue; }
+      if (ch === '`') { stack.pop(); regexPossible = false; i++; continue; }
       if (ch === '$' && code[i + 1] === '{') {
-        stack.push('expr');
+        stack.push({ t: 'expr', d: depth });
         depth++;
-        i++;
         regexPossible = true;
+        i += 2; continue;
       }
+      i++; continue;
+    }
+    if (ch === "'" || ch === '"') { stack.push(ch); regexPossible = false; i++; continue; }
+    if (ch === '`') { stack.push('tpl'); regexPossible = false; i++; continue; }
+    if (ch === '/' && code[i + 1] === '/') {
+      while (i < code.length && code[i] !== '\n') i++;
       continue;
     }
-    if (ch === '"' || ch === "'") { stack.push(ch); regexPossible = false; continue; }
-    if (ch === '`') { stack.push('tpl'); regexPossible = false; continue; }
-    if (ch === '/' && code[i + 1] === '/') { comment = '//'; continue; }
-    if (ch === '/' && code[i + 1] === '*') { comment = '/*'; continue; }
+    if (ch === '/' && code[i + 1] === '*') {
+      const e = code.indexOf('*/', i + 2);
+      if (e === -1) return { error: 'Oavslutad blockkommentar' };
+      i = e + 2; regexPossible = false; continue;
+    }
+    if (/[A-Za-z_$]/.test(ch)) {
+      let j = i;
+      while (j < code.length && /[A-Za-z0-9_$]/.test(code[j])) j++;
+      regexPossible = REGEX_AFTER.has(code.slice(i, j));
+      i = j; continue;
+    }
+    if (/[0-9]/.test(ch)) {
+      while (i < code.length && /[0-9a-fA-FxXoObBn._]/.test(code[i])) i++;
+      regexPossible = false; continue;
+    }
     if (ch === '/' && regexPossible) {
-      let j = i + 1, inClass = false;
+      let j = i + 1, inClass = false, closed = false;
       for (; j < code.length; j++) {
         const c = code[j];
-        if (c === '\\') j++;
-        else if (c === '[') inClass = true;
-        else if (c === ']') inClass = false;
-        else if (c === '\n') return { error: `Oavslutat reguljärt uttryck vid position ${i}` };
-        else if (c === '/' && !inClass) break;
+        if (c === '\\') { j++; continue; }
+        if (inClass) { if (c === ']') inClass = false; continue; }
+        if (c === '[') { inClass = true; continue; }
+        if (c === '\n') break;
+        if (c === '/') { closed = true; break; }
       }
+      if (closed) { i = j + 1; regexPossible = false; continue; }
       if (j >= code.length) return { error: `Oavslutat reguljärt uttryck vid position ${i}` };
-      i = j;
-      regexPossible = false;
-      continue;
     }
-    if (ch === '(' || ch === '[' || ch === '{') { depth++; regexPossible = true; continue; }
-    if (ch === ')' || ch === ']' || ch === '}') {
-      if (ch === '}' && stack[stack.length - 1] === 'expr') {
-        stack.pop();
-        depth--;
-        regexPossible = false;
-        continue;
+    if (ch === '(' || ch === '[' || ch === '{') { depth++; regexPossible = true; i++; continue; }
+    if (ch === ')') { depth--; if (depth < 0) return { error: `Of\u00f6rv\u00e4ntad ')' vid position ${i}` }; regexPossible = false; i++; continue; }
+    if (ch === ']') { depth--; if (depth < 0) return { error: `Of\u00f6rv\u00e4ntad ']' vid position ${i}` }; regexPossible = false; i++; continue; }
+    if (ch === '}') {
+      if (top && top.t === 'expr' && depth === top.d + 1) {
+        stack.pop(); depth--; regexPossible = false; i++; continue;
       }
       depth--;
-      if (depth < 0) return { error: `Oförväntad '${ch}' vid position ${i}` };
-      regexPossible = false;
-      continue;
+      if (depth < 0) return { error: `Of\u00f6rv\u00e4ntad '}' vid position ${i}` };
+      regexPossible = false; i++; continue;
     }
-    regexPossible = !/[A-Za-z0-9_$\)\]\}]/.test(ch);
+    if (/\s/.test(ch)) { i++; continue; }
+    regexPossible = !/[)\]}.$@#]/.test(ch);
+    i++; continue;
   }
+  if (escape) return { error: 'Oavslutad escape-sekvens' };
   if (stack.length) {
     const top = stack[stack.length - 1];
-    if (top === 'tpl') return { error: 'Oavslutad mallsträng (`)' };
-    if (top === 'expr') return { error: 'Oavslutad interpolation (${)' };
-    return { error: `Oavslutad sträng (${top})` };
+    if (top === 'tpl') return { error: 'Oavslutad mallstr\u00e4ng (`)' };
+    if (top && top.t === 'expr') return { error: 'Oavslutad interpolation (${)' };
+    return { error: `Oavslutad str\u00e4ng (${top})` };
   }
-  if (comment === '/*') return { error: 'Oavslutad blockkommentar' };
   if (depth !== 0) return { error: `Obalanserade parenteser (djup ${depth})` };
   return true;
 }
