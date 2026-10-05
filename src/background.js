@@ -794,7 +794,11 @@ async function updateScripts(id) {
       const hash = contentHash(code);
       const newer = versionIsNewer(meta.version, s.version);
       const changed = hash !== s.contentHash;
-      if (!newer && !changed) continue;
+      if (!newer && !changed) {
+        // unchanged upstream: drop any stale rejection error from storage
+        await clearError(s.id);
+        continue;
+      }
       // reject broken updates: keep the last known-good version in place
       const probe = scriptParses(code);
       if (probe !== true) {
@@ -814,6 +818,7 @@ async function updateScripts(id) {
       s.updateURL = meta.updateURL || s.updateURL;
       s.runAt = meta.runAt || s.runAt;
       s.updatedAt = Date.now();
+      await clearError(s.id);
       updated++;
     } catch (e) {
       console.warn(`[SBR-bot] update failed for "${s.name}":`, e.message);
