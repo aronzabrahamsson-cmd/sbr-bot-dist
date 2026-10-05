@@ -212,36 +212,40 @@ window.__sbrInit = function (config) {
     }
   };
   connectPort();
-  const call = function (type, extra, _retries) {
+  const call = function (type, extra, _attempt) {
+    _attempt = _attempt || 0;
+    // Wake-race: a message that wakes a cold SW may be dropped ("Receiving end
+    // does not exist") while the worker starts. Retry with backoff.
+    const BACKOFF = [250, 500, 1000, 2000, 4000];
     return new Promise(function (resolve, reject) {
       const payload = Object.assign({ type: type, storeKey: storeKey }, extra || {});
+      const giveUp = function (msg) {
+        console.error('[SBR-bot] sendMessage failed after ' + (_attempt + 1) + ' attempts:', msg);
+        reject(new Error(msg));
+      };
+      const retry = function (msg) {
+        if (_attempt < BACKOFF.length) {
+          setTimeout(function () {
+            call(type, extra, _attempt + 1).then(resolve, reject);
+          }, BACKOFF[_attempt]);
+        } else {
+          giveUp(msg);
+        }
+      };
       try {
         chrome.runtime.sendMessage(payload, function (response) {
           const err = chrome.runtime.lastError;
-          if (err) {
-            // worker asleep/awakening: message woke it, retry shortly
-            if (!_retries) {
-              setTimeout(function () { call(type, extra, 1).then(resolve, reject); }, 250);
-            } else {
-              console.error('[SBR-bot] sendMessage failed:', err.message);
-              reject(new Error(err.message));
-            }
-          } else {
-            resolve(response);
-          }
+          if (err) retry(err.message);
+          else resolve(response);
         });
       } catch (e) {
-        if (!_retries) {
-          setTimeout(function () { call(type, extra, 1).then(resolve, reject); }, 250);
-        } else {
-          reject(e);
-        }
+        retry(e && e.message);
       }
     });
   };
   Promise.race([
     call('ping', {}),
-    new Promise(function (_, rej) { setTimeout(function () { rej(new Error('ping timeout')); }, 2000); })
+    new Promise(function (_, rej) { setTimeout(function () { rej(new Error('ping timeout')); }, 10000); })
   ]).then(function () {
     console.log('[SBR-bot] bridge OK');
   }, function (e) {
@@ -563,7 +567,16 @@ window.__sbrInit = function (config) {
 `;
 
 // record last injection errors per script for the dashboard
+async function flashBadge(text) {
+  try {
+    await chrome.action.setBadgeText({ text: String(text).slice(0, 4) });
+    await chrome.action.setBadgeBackgroundColor({ color: '#d93025' });
+    setTimeout(() => chrome.action.setBadgeText({ text: '' }), 30000);
+  } catch (e) { /* ignore */ }
+}
+
 async function recordError(scriptId, message) {
+  try { await flashBadge('ERR'); } catch (e) { /* ignore */ }
   const data = await chrome.storage.local.get('injectErrors');
   const errs = data.injectErrors || {};
   errs[scriptId] = { message: String(message), at: Date.now() };
@@ -650,6 +663,22 @@ async function injectMatching(tabId, url) {
 
 /* ---------- updates ---------- */
 
+// Syntax-probe a script body BEFORE swapping it in: a truncated/broken
+// update must never replace the last known-good version.
+function scriptParses(code) {
+  try { new Function(code); return true; } catch (e) { return { error: e.message }; }
+}
+
+// FNV-1a content hash: detects repaired re-publishes that reuse a version
+function contentHash(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;
+  }
+  return h.toString(16);
+}
+
 async function updateScripts(id) {
   const scripts = await getScripts();
   let updated = 0;
@@ -662,8 +691,22 @@ async function updateScripts(id) {
       const code = await res.text();
       if (!code.trim()) continue;
       const meta = parseMetadata(code);
-      if (!versionIsNewer(meta.version, s.version)) continue;
+      const hash = contentHash(code);
+      const newer = versionIsNewer(meta.version, s.version);
+      const changed = hash !== s.contentHash;
+      if (!newer && !changed) continue;
+      // reject broken updates: keep the last known-good version in place
+      const probe = scriptParses(code);
+      if (probe !== true) {
+        await recordError(s.id, 'Uppdatering avvisad (syntaxfel): ' + probe.error);
+        console.warn(`[SBR-bot] update for "${s.name}" ${meta.version} REJECTED (syntax):`, probe.error);
+        continue;
+      }
+      if (!newer && changed) {
+        console.log(`[SBR-bot] update for "${s.name}": same version ${meta.version} but content changed — applying`);
+      }
       s.code = code;
+      s.contentHash = hash;
       s.version = meta.version;
       s.name = meta.name || s.name;
       s.matches = meta.matches.length ? meta.matches : s.matches;
@@ -775,6 +818,7 @@ const handleGmMessage = async (msg, sender, sendResponse) => {
       case 'saveScript': {
         const scripts = await getScripts();
         const s = msg.script;
+        s.contentHash = contentHash(s.code || '');
         const i = scripts.findIndex(x => x.id === s.id);
         if (i >= 0) scripts[i] = s; else scripts.push(s);
         await setScripts(scripts);
