@@ -186,6 +186,36 @@ async function render() {
 
 $('addBtn').onclick = () => openEditor(null);
 
+/* ---- GM storage export/import ---- */
+$('gmExportBtn').onclick = async () => {
+  const res = await send({ type: 'gmExport' });
+  if (!res?.ok) { alert('Kunde inte exportera: ' + (res?.error || 'okänt fel')); return; }
+  const blob = new Blob([JSON.stringify({ sbrGmValues: res.data, exportedAt: new Date().toISOString() }, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'sbr-bot-gm-values.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+$('gmImportBtn').onclick = () => $('gmImportFile').click();
+$('gmImportFile').onchange = async (ev) => {
+  const file = ev.target.files[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const parsed = JSON.parse(text);
+    const data = parsed.sbrGmValues || parsed;
+    const names = Object.keys(data);
+    if (!names.length) { alert('Filen inneh\u00e4ller inga v\u00e4rden.'); return; }
+    if (!confirm(`Importera GM-v\u00e4rden f\u00f6r ${names.length} script? Befintliga nycklar med samma namn skrivs \u00f6ver.`)) return;
+    const res = await send({ type: 'gmImport', data });
+    alert(res?.ok ? `Importerade ${res.count} v\u00e4rden.` : 'Import misslyckades: ' + (res?.error || 'ok\u00e4nt fel'));
+  } catch (e) {
+    alert('Ogiltig JSON-fil: ' + e.message);
+  }
+  ev.target.value = '';
+};
+
 // auto-parse metadata while typing/pasting code
 $('code').addEventListener('input', e => applyMetaToForm(e.target.value));
 
@@ -295,7 +325,10 @@ async function runInstallFlow(url) {
 
   // find existing script with same name
   const { scripts } = await send({ type: 'getScripts' });
-  const existing = scripts.find(s => s.name === meta.name);
+  // identity: @namespace + @name (Tampermonkey-style), name as fallback
+  const existing = scripts.find(s =>
+    (meta.namespace && s.namespace === meta.namespace) && s.name === (meta.name || s.name)
+  ) || scripts.find(s => s.name === meta.name && (!meta.namespace || !s.namespace));
 
   $('installTitle').textContent = existing ? 'Uppdatera script' : 'Installera script';
   info.innerHTML = existing
@@ -325,6 +358,7 @@ async function runInstallFlow(url) {
     const script = {
       id: existing?.id || crypto.randomUUID(),
       name: meta.name,
+      namespace: meta.namespace || existing?.namespace || '',
       version: meta.version || '',
       updateURL: meta.updateURL || url,
       runAt: meta.runAt || 'document-idle',

@@ -22,7 +22,7 @@ if (chrome.userScripts?.configureWorld) {
 function parseMetadata(code) {
   const meta = {
     name: '', version: '', matches: [], excludes: [], updateURL: '',
-    runAt: 'document-idle', description: ''
+    runAt: 'document-idle', description: '', namespace: ''
   };
   // normalize: strip BOM, unify line endings (Tampermonkey tolerates these)
   const norm = String(code)
@@ -36,6 +36,7 @@ function parseMetadata(code) {
     const [, key, val] = t;
     switch (key) {
       case 'name': meta.name = val.trim(); break;
+      case 'namespace': meta.namespace = val.trim(); break;
       case 'version': meta.version = val.trim(); break;
       case 'match': meta.matches.push(val.trim()); break;
       case 'exclude':
@@ -405,7 +406,16 @@ window.__sbrInit = function (config) {
       }
       if (opts.onload) opts.onload(details);
     }).catch(function (err) {
-      if (!state.aborted && opts.onerror) opts.onerror({ error: String(err), status: 0, readyState: 4 });
+      const msg = String(err);
+      const bridgeDead = /Receiving end does not exist|sendMessage failed/i.test(msg);
+      const reason = bridgeDead
+        ? 'SBR-bot-bryggan kunde inte nå service workern (ladda om sidan eller starta om tillägget)'
+        : msg;
+      console.error('[SBR-bot] GM_xmlhttpRequest failed:', reason);
+      if (!state.aborted) {
+        if (opts.onerror) opts.onerror({ error: reason, status: 0, readyState: 4 });
+        else throw new Error('GM_xmlhttpRequest: ' + reason);
+      }
     });
     return {
       abort: function () {
@@ -813,6 +823,7 @@ async function updateScripts(id) {
       s.contentHash = hash;
       s.version = meta.version;
       s.name = meta.name || s.name;
+      s.namespace = meta.namespace || s.namespace || '';
       s.matches = meta.matches.length ? meta.matches : s.matches;
       s.excludes = meta.excludes.length ? meta.excludes : s.excludes;
       s.updateURL = meta.updateURL || s.updateURL;
@@ -913,6 +924,31 @@ const handleGmMessage = async (msg, sender, sendResponse) => {
         }
         await chrome.storage.local.set({ menuCommands: all });
         sendResponse({ ok: true, commands });
+        break;
+      }
+      case 'gmExport': {
+        // dump ALL GM values for all scripts: { scriptId: { key: value } }
+        const all = await chrome.storage.local.get(null);
+        const out = {};
+        for (const [k, v] of Object.entries(all)) {
+          const m = /^gm_(.+)::(.+)$/.exec(k);
+          if (!m) continue;
+          const id = m[1];
+          (out[id] = out[id] || {})[m[2]] = v;
+        }
+        sendResponse({ ok: true, data: out });
+        break;
+      }
+      case 'gmImport': {
+        const data = msg.data || {};
+        let count = 0;
+        for (const [id, values] of Object.entries(data)) {
+          for (const [key, value] of Object.entries(values || {})) {
+            await chrome.storage.local.set({ ['gm_' + id + '::' + key]: value });
+            count++;
+          }
+        }
+        sendResponse({ ok: true, count });
         break;
       }
       case 'getInjectErrors': {
