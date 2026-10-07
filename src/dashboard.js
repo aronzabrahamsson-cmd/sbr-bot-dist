@@ -219,6 +219,97 @@ $('gmImportFile').onchange = async (ev) => {
 // auto-parse metadata while typing/pasting code
 $('code').addEventListener('input', e => applyMetaToForm(e.target.value));
 
+/* ---- scripts export/import (all at once) ---- */
+$('scriptsExportBtn').onclick = async () => {
+  const [scriptsRes, gmRes] = await Promise.all([
+    send({ type: 'getScripts' }),
+    send({ type: 'gmExport' })
+  ]);
+  if (!scriptsRes?.ok) { alert('Kunde inte exportera: ' + (scriptsRes?.error || 'okänt fel')); return; }
+  const bundle = {
+    sbrBotExport: true,
+    format: 'sbr-bot-scripts',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    scripts: scriptsRes.scripts,
+    gmValues: gmRes?.ok ? gmRes.data : {}
+  };
+  const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'sbr-bot-scripts.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+
+async function importScriptsBundle(file) {
+  let parsed;
+  try {
+    parsed = JSON.parse(await file.text());
+  } catch (e) {
+    alert('Ogiltig JSON-fil: ' + e.message);
+    return;
+  }
+  const scripts = parsed.sbrBotExport ? parsed.scripts : (Array.isArray(parsed) ? parsed : null);
+  if (!Array.isArray(scripts)) {
+    alert('Filen innehåller inga script.');
+    return;
+  }
+  const valid = scripts.filter(s => s && typeof s.name === 'string' && typeof s.code === 'string');
+  if (!valid.length) { alert('Filen innehåller inga giltiga script.'); return; }
+  if (!confirm(`Importera ${valid.length} script? Script med samma namn/namespace skrivs över.`)) return;
+  const { scripts: existing } = await send({ type: 'getScripts' });
+  let imported = 0;
+  const idMap = {};
+  for (const s of valid) {
+    const match = existing.find(x =>
+      (s.namespace && x.namespace === s.namespace && x.name === s.name) ||
+      (!s.namespace && x.name === s.name)
+    );
+    const script = {
+      ...s,
+      id: match?.id || s.id || crypto.randomUUID(),
+      enabled: s.enabled !== false,
+      updatedAt: Date.now()
+    };
+    if (!Array.isArray(script.matches)) script.matches = [];
+    if (!Array.isArray(script.excludes)) script.excludes = [];
+    await send({ type: 'saveScript', script });
+    if (s.id) idMap[s.id] = script.id;
+    imported++;
+  }
+  if (parsed.sbrBotExport && parsed.gmValues && Object.keys(parsed.gmValues).length) {
+    const remapped = {};
+    for (const [oldId, values] of Object.entries(parsed.gmValues)) {
+      const newId = idMap[oldId];
+      if (newId && values && typeof values === 'object') remapped[newId] = values;
+    }
+    if (Object.keys(remapped).length) await send({ type: 'gmImport', data: remapped });
+  }
+  alert(`Importerade ${imported} script.`);
+  render();
+}
+
+/* drag-and-drop */
+let dragDepth = 0;
+addEventListener('dragenter', e => {
+  e.preventDefault();
+  dragDepth++;
+  if (e.dataTransfer?.types?.includes('Files')) $('dropOverlay').classList.add('open');
+});
+addEventListener('dragover', e => e.preventDefault());
+addEventListener('dragleave', e => {
+  e.preventDefault();
+  if (--dragDepth <= 0) { dragDepth = 0; $('dropOverlay').classList.remove('open'); }
+});
+addEventListener('drop', async e => {
+  e.preventDefault();
+  dragDepth = 0;
+  $('dropOverlay').classList.remove('open');
+  const file = [...(e.dataTransfer?.files || [])].find(f => f.name.endsWith('.json'));
+  if (file) await importScriptsBundle(file);
+});
+
 $('save').onclick = async () => {
   const meta = parseMetadata($('code').value);
   const splitLines = (v) => v.split('\n').map(l => l.trim()).filter(Boolean);

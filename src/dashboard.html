@@ -115,6 +115,18 @@
     @media (prefers-color-scheme: dark) {
       #extStatus { color: #b5b5b5; }
     }
+
+    /* drag-and-drop import overlay */
+    .drop-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55);
+                    display: none; align-items: center; justify-content: center;
+                    z-index: 200; }
+    .drop-overlay.open { display: flex; }
+    .drop-box { border: 3px dashed #2e9e44; border-radius: 12px; padding: 40px 60px;
+                background: #fff; color: #222; font-size: 17px; font-weight: 600;
+                text-align: center; }
+    @media (prefers-color-scheme: dark) {
+      .drop-box { background: #242424; color: #eee; }
+    }
     /* ---- final dark-mode overrides (must come LAST so they win the cascade
        over the light button rules above) ---- */
     @media (prefers-color-scheme: dark) {
@@ -152,7 +164,12 @@
   <button id="addBtn">➕ Lägg till nytt script</button>
   <button id="gmExportBtn">💾 Exportera GM-lagring</button>
   <button id="gmImportBtn">📂 Importera GM-lagring</button>
+  <button id="scriptsExportBtn">📦 Exportera alla script</button>
   <input type="file" id="gmImportFile" accept="application/json" style="display:none">
+
+  <div class="drop-overlay" id="dropOverlay">
+    <div class="drop-box">Släpp filen här för att importera script</div>
+  </div>
 
   <table id="tbl">
     <thead>
