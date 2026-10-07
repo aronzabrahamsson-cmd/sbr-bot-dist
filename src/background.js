@@ -928,13 +928,22 @@ const handleGmMessage = async (msg, sender, sendResponse) => {
       }
       case 'gmExport': {
         // dump ALL GM values for all scripts: { scriptId: { key: value } }
+        // covers both the v0.8+ per-key format (gm_<id>::<key>) and the
+        // legacy whole-object format (gm_<id> -> {key: value})
         const all = await chrome.storage.local.get(null);
         const out = {};
         for (const [k, v] of Object.entries(all)) {
           const m = /^gm_(.+)::(.+)$/.exec(k);
-          if (!m) continue;
-          const id = m[1];
-          (out[id] = out[id] || {})[m[2]] = v;
+          if (m) {
+            const id = m[1];
+            (out[id] = out[id] || {})[m[2]] = v;
+            continue;
+          }
+          const legacy = /^gm_([\w-]+)$/.exec(k);
+          if (legacy && v && typeof v === 'object') {
+            const id = legacy[1];
+            out[id] = Object.assign({}, v, out[id] || {});
+          }
         }
         sendResponse({ ok: true, data: out });
         break;
