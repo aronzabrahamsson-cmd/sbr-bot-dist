@@ -210,10 +210,10 @@ window.__sbrInit = function (config) {
     bridgeDead = true;
     if (!deadErrorLogged) {
       deadErrorLogged = true;
-      console.error('[SBR-bot] BRIDGE DEAD: service workern kan inte nås efter\n' +
-        'retry med omregistrering i ~60 s (' + msg + '). GM-anrop misslyckar tills bryggan\n' +
-        'är uppe igen. Kontrollera chrome://extensions → SBR-bot: att "Tillåt\n' +
-        'användarskript" är på och att service workern kör. Ladda om FLIKEN först när\n' +
+      console.error('[SBR-bot] BRIDGE DEAD: service workern kan inte nås efter\\n' +
+        'retry med omregistrering i ~60 s (' + msg + '). GM-anrop misslyckar tills bryggan\\n' +
+        'är uppe igen. Kontrollera chrome://extensions → SBR-bot: att "Tillåt\\n' +
+        'användarskript" är på och att service workern kör. Ladda om FLIKEN först när\\n' +
         'workern är uppe — inte före. Vidare fel rapporteras tyst till bryggan återkommer.');
     }
   };
