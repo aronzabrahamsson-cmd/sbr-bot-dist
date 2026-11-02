@@ -5,17 +5,26 @@
 
 const UPDATE_ALARM = 'sbr-bot-update';
 const UPDATE_PERIOD_MIN = 30;
+const KEEPALIVE_ALARM = 'sbr-bot-keepalive';
 
 // Re-assert USER_SCRIPT world messaging on EVERY cold start: if this is not
 // applied, chrome.runtime.sendMessage from the user script world throws
 // "Receiving end does not exist". Must run at top level, before any await.
+// The onMessage listener further down is likewise registered synchronously at
+// top level (never inside an async promise), so it is up before any ping.
 if (chrome.userScripts?.configureWorld) {
   chrome.userScripts.configureWorld({ messaging: true })
-    .then(() => console.log('[SBR-bot] SW up, userScripts world messaging enabled'))
+    .then(() => console.log('[SBR-bot] bridge ready (SW up, userScripts world messaging enabled)'))
     .catch(e => console.error('[SBR-bot] configureWorld failed (is "Till\u00e5t anv\u00e4ndarskript" on?):', e));
 } else {
   console.warn('[SBR-bot] SW up, but chrome.userScripts unavailable');
 }
+
+// MV3 service workers sleep after ~30 s idle and can be stopped; a 30 s alarm
+// wakes the worker so the message listener is up even with no tabs open.
+chrome.alarms.get(KEEPALIVE_ALARM).then((a) => {
+  if (!a) chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
+});
 
 /* ---------- metadata parsing ---------- */
 
@@ -191,6 +200,24 @@ window.__sbrInit = function (config) {
   let port = null;
   let callSeq = 0;
   const progListeners = [];
+  let bridgeDead = false;
+  let deadErrorLogged = false;
+  const markAlive = function () {
+    bridgeDead = false;
+    deadErrorLogged = false;
+  };
+  const markDead = function (msg) {
+    bridgeDead = true;
+    if (!deadErrorLogged) {
+      deadErrorLogged = true;
+      console.error('[SBR-bot] BRIDGE DEAD: service workern kan inte nås efter\n' +
+        'retry med omregistrering i ~60 s (' + msg + '). GM-anrop misslyckar tills bryggan\n' +
+        'är uppe igen. Kontrollera chrome://extensions → SBR-bot: att "Tillåt\n' +
+        'användarskript" är på och att service workern kör. Ladda om FLIKEN först när\n' +
+        'workern är uppe — inte före. Vidare fel rapporteras tyst till bryggan återkommer.');
+    }
+  };
+  const noop = function () {};
   // The port is a keep-alive only: it holds the SW awake and carries
   // progress events. Request/response traffic goes over sendMessage,
   // which is the proven path from the USER_SCRIPT world.
@@ -213,16 +240,24 @@ window.__sbrInit = function (config) {
     }
   };
   connectPort();
+  // Port keep-alive: an open but silent port does not stop MV3 idle
+  // termination; a small ping every 25 s counts as port activity.
+  setInterval(function () {
+    try { if (port) port.postMessage({ type: 'keepalive' }); } catch (e) { /* ignore */ }
+  }, 25000);
   const call = function (type, extra, _attempt) {
     _attempt = _attempt || 0;
     // Wake-race: a message that wakes a cold SW may be dropped ("Receiving end
     // does not exist") while the worker starts. Retry with backoff.
-    const BACKOFF = [250, 500, 1000, 2000, 4000];
+    const BACKOFF = [250, 500, 1000, 2000, 4000, 4000];
+    if (bridgeDead && type !== 'ping' && _attempt === 0) {
+      return Promise.reject(new Error('SBR-bot bridge dead'));
+    }
     return new Promise(function (resolve, reject) {
       const payload = Object.assign({ type: type, storeKey: storeKey }, extra || {});
       const giveUp = function (msg) {
-        console.error('[SBR-bot] sendMessage failed after ' + (_attempt + 1) + ' attempts:', msg);
-        reject(new Error(msg));
+        markDead(msg);
+        reject(new Error('SBR-bot bridge dead (' + msg + ')'));
       };
       const retry = function (msg) {
         if (_attempt < BACKOFF.length) {
@@ -237,20 +272,45 @@ window.__sbrInit = function (config) {
         chrome.runtime.sendMessage(payload, function (response) {
           const err = chrome.runtime.lastError;
           if (err) retry(err.message);
-          else resolve(response);
+          else { markAlive(); resolve(response); }
         });
       } catch (e) {
         retry(e && e.message);
       }
     });
   };
-  Promise.race([
-    call('ping', {}),
-    new Promise(function (_, rej) { setTimeout(function () { rej(new Error('ping timeout')); }, 10000); })
-  ]).then(function () {
-    console.log('[SBR-bot] bridge OK');
-  }, function (e) {
-    console.error('[SBR-bot] bridge ping FAILED:', e && e.message);
+  // Registration/recovery loop: a failed ping is never fatal on its own.
+  // Re-register (port + ping) with exponential backoff for ~60 s; only then
+  // mark the bridge dead. Never chrome.runtime.reload() from the page.
+  const PING_BACKOFF = [500, 1000, 2000, 4000, 8000, 8000, 8000, 8000, 8000, 8000, 8000, 8000];
+  let bridgeReadyLogged = false;
+  const pingOnce = function () {
+    return Promise.race([
+      call('ping', {}),
+      new Promise(function (_, rej) { setTimeout(function () { rej(new Error('ping timeout')); }, 15000); })
+    ]);
+  };
+  const onBridgeReady = function () {
+    if (!bridgeReadyLogged) {
+      bridgeReadyLogged = true;
+      console.log('[SBR-bot] bridge OK');
+    } else {
+      console.log('[SBR-bot] bridge OK (\u00e5terh\u00e4mtad)');
+    }
+  };
+  const recover = function (attempt, err) {
+    if (attempt < PING_BACKOFF.length) {
+      setTimeout(function () {
+        connectPort();
+        pingOnce().then(onBridgeReady, function (e) { recover(attempt + 1, e); });
+      }, PING_BACKOFF[attempt]);
+    } else {
+      markDead(err && err.message);
+    }
+  };
+  pingOnce().then(onBridgeReady, function (e) {
+    console.warn('[SBR-bot] bridge ping misslyckades, omregistrerar med backoff:', e && e.message);
+    recover(0, e);
   });
   const configId = config.id;
   const menuCommands = {};
@@ -290,7 +350,7 @@ window.__sbrInit = function (config) {
   function GM_setValue(key, value) {
     const oldVal = key in cache ? cache[key] : undefined;
     cache[key] = value;
-    call('gmSet', { key: key, value: value });
+    call('gmSet', { key: key, value: value }).catch(noop);
     for (const fn of Object.values(listeners)) {
       try { fn(key, oldVal, value, false); }
       catch (e) { console.error('[SBR-bot] value listener error', e); }
@@ -301,7 +361,7 @@ window.__sbrInit = function (config) {
   }
   function GM_deleteValue(key) {
     delete cache[key];
-    call('gmDel', { key: key });
+    call('gmDel', { key: key }).catch(noop);
   }
   function GM_listValues() {
     return Object.keys(cache);
@@ -407,14 +467,14 @@ window.__sbrInit = function (config) {
       if (opts.onload) opts.onload(details);
     }).catch(function (err) {
       const msg = String(err);
-      const bridgeDead = /Receiving end does not exist|sendMessage failed/i.test(msg);
-      const reason = bridgeDead
-        ? 'SBR-bot-bryggan kunde inte nå service workern (ladda om sidan eller starta om tillägget)'
+      const bridgeDeadErr = /SBR-bot bridge dead|Receiving end does not exist|sendMessage failed/i.test(msg);
+      const reason = bridgeDeadErr
+        ? 'SBR-bot-bryggan är död (service workern nås inte) — ladda om fliken när workern är uppe, eller kontrollera tillägget i chrome://extensions'
         : msg;
       console.error('[SBR-bot] GM_xmlhttpRequest failed:', reason);
       if (!state.aborted) {
         if (opts.onerror) opts.onerror({ error: reason, status: 0, readyState: 4 });
-        else throw new Error('GM_xmlhttpRequest: ' + reason);
+        else if (opts.ontimeout) opts.ontimeout({ error: reason, status: 0, readyState: 4 });
       }
     });
     return {
@@ -843,6 +903,7 @@ async function updateScripts(id) {
 
 chrome.runtime.onInstalled.addListener(async () => {
   chrome.alarms.create(UPDATE_ALARM, { periodInMinutes: UPDATE_PERIOD_MIN });
+  chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
 });
 
 /* ---------- injection triggers: frame-aware (v0.9) ----------
@@ -1264,6 +1325,10 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === KEEPALIVE_ALARM) {
+    console.log('[SBR-bot] bridge ready (keepalive alarm)');
+    return;
+  }
   if (alarm.name !== UPDATE_ALARM) return;
   await updateScripts(null);
 });
