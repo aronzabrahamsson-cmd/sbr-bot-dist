@@ -12,13 +12,29 @@ const KEEPALIVE_ALARM = 'sbr-bot-keepalive';
 // "Receiving end does not exist". Must run at top level, before any await.
 // The onMessage listener further down is likewise registered synchronously at
 // top level (never inside an async promise), so it is up before any ping.
-if (chrome.userScripts?.configureWorld) {
-  chrome.userScripts.configureWorld({ messaging: true })
-    .then(() => console.log('[SBR-bot] bridge ready (SW up, userScripts world messaging enabled)'))
-    .catch(e => console.error('[SBR-bot] configureWorld failed (is "Till\u00e5t anv\u00e4ndarskript" on?):', e));
-} else {
-  console.warn('[SBR-bot] SW up, but chrome.userScripts unavailable');
-}
+let worldMessagingReady = false;
+const ensureWorldMessaging = async function (attempt) {
+  if (!chrome.userScripts?.configureWorld) {
+    console.warn('[SBR-bot] SW up, but chrome.userScripts unavailable');
+    return false;
+  }
+  try {
+    await chrome.userScripts.configureWorld({ messaging: true });
+    worldMessagingReady = true;
+    console.log('[SBR-bot] bridge ready (SW up, userScripts world messaging enabled)');
+    return true;
+  } catch (e) {
+    worldMessagingReady = false;
+    console.error('[SBR-bot] configureWorld failed (is "Till\u00e5t anv\u00e4ndarskript" on?):', e);
+    const backoff = [1000, 5000, 15000];
+    const i = attempt || 0;
+    if (i < backoff.length) {
+      setTimeout(() => { ensureWorldMessaging(i + 1); }, backoff[i]);
+    }
+    return false;
+  }
+};
+ensureWorldMessaging(0);
 
 // MV3 service workers sleep after ~30 s idle and can be stopped; a 30 s alarm
 // wakes the worker so the message listener is up even with no tabs open.
@@ -214,7 +230,7 @@ window.__sbrInit = function (config) {
         'retry med omregistrering i ~60 s (' + msg + '). GM-anrop misslyckar tills bryggan\\n' +
         'är uppe igen. Kontrollera chrome://extensions → SBR-bot: att "Tillåt\\n' +
         'användarskript" är på och att service workern kör. Ladda om FLIKEN först när\\n' +
-        'workern är uppe — inte före. Vidare fel rapporteras tyst till bryggan återkommer.');
+        'workern är uppe. Bryggan pingar automatiskt var 30:e s och återhämtar sig utan omladdning när workern svarar.');
     }
   };
   const noop = function () {};
@@ -306,6 +322,9 @@ window.__sbrInit = function (config) {
       }, PING_BACKOFF[attempt]);
     } else {
       markDead(err && err.message);
+      setInterval(function () {
+        pingOnce().then(onBridgeReady, noop);
+      }, 30000);
     }
   };
   pingOnce().then(onBridgeReady, function (e) {
@@ -904,6 +923,7 @@ async function updateScripts(id) {
 chrome.runtime.onInstalled.addListener(async () => {
   chrome.alarms.create(UPDATE_ALARM, { periodInMinutes: UPDATE_PERIOD_MIN });
   chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
+  ensureWorldMessaging(0);
 });
 
 /* ---------- injection triggers: frame-aware (v0.9) ----------
@@ -1327,6 +1347,7 @@ chrome.runtime.onConnect.addListener((port) => {
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === KEEPALIVE_ALARM) {
     console.log('[SBR-bot] bridge ready (keepalive alarm)');
+    if (!worldMessagingReady) ensureWorldMessaging(0);
     return;
   }
   if (alarm.name !== UPDATE_ALARM) return;
