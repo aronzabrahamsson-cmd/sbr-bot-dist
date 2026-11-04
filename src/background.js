@@ -36,10 +36,15 @@ const ensureWorldMessaging = async function (attempt) {
 };
 ensureWorldMessaging(0);
 
-// MV3 service workers sleep after ~30 s idle and can be stopped; a 30 s alarm
-// wakes the worker so the message listener is up even with no tabs open.
+// MV3 service workers sleep after ~30 s idle and can be stopped. A periodic
+// alarm can be clamped to 60 s on some Chrome builds, leaving the worker dead
+// for half of every minute, so instead re-arm a one-shot alarm every 25 s:
+// each alarm event resets the idle timer and keeps the worker (and its
+// message listener) alive continuously.
+const KEEPALIVE_MS = 25000;
+const rearmKeepalive = () => chrome.alarms.create(KEEPALIVE_ALARM, { when: Date.now() + KEEPALIVE_MS });
 chrome.alarms.get(KEEPALIVE_ALARM).then((a) => {
-  if (!a) chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
+  if (!a) rearmKeepalive();
 });
 
 /* ---------- metadata parsing ---------- */
@@ -218,12 +223,18 @@ window.__sbrInit = function (config) {
   const progListeners = [];
   let bridgeDead = false;
   let deadErrorLogged = false;
+  const pendingCalls = new Set();
   const markAlive = function () {
     bridgeDead = false;
     deadErrorLogged = false;
   };
   const markDead = function (msg) {
     bridgeDead = true;
+    // Fail all in-flight calls immediately instead of letting them hang until
+    // their shim-side guard (timeout+5 s) fires — that hang is what made one
+    // dead SW cost minutes per GM-anrop in the userscripts.
+    for (const rej of pendingCalls) { try { rej(new Error('SBR-bot bridge dead (' + msg + ')')); } catch (e) {} }
+    pendingCalls.clear();
     if (!deadErrorLogged) {
       deadErrorLogged = true;
       console.error('[SBR-bot] BRIDGE DEAD: service workern kan inte nås efter\\n' +
@@ -264,21 +275,27 @@ window.__sbrInit = function (config) {
   const call = function (type, extra, _attempt) {
     _attempt = _attempt || 0;
     // Wake-race: a message that wakes a cold SW may be dropped ("Receiving end
-    // does not exist") while the worker starts. Retry with backoff.
-    const BACKOFF = [250, 500, 1000, 2000, 4000, 4000];
+    // does not exist") while the worker starts. Retry with backoff — with the
+    // 25 s keepalive alarm chain the worker is normally up within a second or
+    // two, so a short backoff suffices; the old ~12 s chain added that latency
+    // to every call made while the bridge was down.
+    const BACKOFF = [200, 400, 800, 1600, 3200];
     if (bridgeDead && type !== 'ping' && _attempt === 0) {
       return Promise.reject(new Error('SBR-bot bridge dead'));
     }
     return new Promise(function (resolve, reject) {
+      const wrappedReject = function (e) { pendingCalls.delete(wrappedReject); reject(e); };
+      const wrappedResolve = function (v) { pendingCalls.delete(wrappedReject); resolve(v); };
+      pendingCalls.add(wrappedReject);
       const payload = Object.assign({ type: type, storeKey: storeKey }, extra || {});
       const giveUp = function (msg) {
         markDead(msg);
-        reject(new Error('SBR-bot bridge dead (' + msg + ')'));
+        wrappedReject(new Error('SBR-bot bridge dead (' + msg + ')'));
       };
       const retry = function (msg) {
         if (_attempt < BACKOFF.length) {
           setTimeout(function () {
-            call(type, extra, _attempt + 1).then(resolve, reject);
+            call(type, extra, _attempt + 1).then(wrappedResolve, wrappedReject);
           }, BACKOFF[_attempt]);
         } else {
           giveUp(msg);
@@ -288,7 +305,7 @@ window.__sbrInit = function (config) {
         chrome.runtime.sendMessage(payload, function (response) {
           const err = chrome.runtime.lastError;
           if (err) retry(err.message);
-          else { markAlive(); resolve(response); }
+          else { markAlive(); wrappedResolve(response); }
         });
       } catch (e) {
         retry(e && e.message);
@@ -922,7 +939,7 @@ async function updateScripts(id) {
 
 chrome.runtime.onInstalled.addListener(async () => {
   chrome.alarms.create(UPDATE_ALARM, { periodInMinutes: UPDATE_PERIOD_MIN });
-  chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
+  rearmKeepalive();
   ensureWorldMessaging(0);
 });
 
@@ -1346,6 +1363,7 @@ chrome.runtime.onConnect.addListener((port) => {
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === KEEPALIVE_ALARM) {
+    rearmKeepalive();
     console.log('[SBR-bot] bridge ready (keepalive alarm)');
     if (!worldMessagingReady) ensureWorldMessaging(0);
     return;
